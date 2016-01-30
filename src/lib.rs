@@ -9,6 +9,9 @@ use std::borrow::Borrow;
 
 pub trait Exception : Any {
     fn what(&self) -> &str;
+
+    #[doc(hidden)]
+    fn cpp_exception(&self) -> *mut libc::c_void { std::ptr::null_mut() }
 }
 
 pub trait Rethrow {
@@ -33,7 +36,7 @@ extern {
                caught_rust: *mut bool) -> FakeTraitObject;
 
     fn cpp_throw_rust(exception: FakeTraitObject) -> !;
-    // fn cpp_rethrow() -> !;
+    fn cpp_rethrow(exception: *mut libc::c_void) -> !;
     fn cpp_exception_what(exception: *mut libc::c_void) -> *const libc::c_char;
     fn cpp_exception_destroy(exception: *mut libc::c_void);
 
@@ -60,6 +63,10 @@ impl Exception for NativeCppExceptionWrapper {
             CStr::from_ptr(c_str).to_str().unwrap()
         }
     }
+
+    fn cpp_exception(&self) -> *mut libc::c_void {
+        self.exception
+    }
 }
 struct ThrowState<T, F: FnOnce() -> T> {
     try_block: Option<F>,
@@ -70,6 +77,7 @@ extern fn try_internal<T, F: FnOnce() -> T>(state: *mut ThrowState<T, F>) {
     let borrowed_state: &mut ThrowState<T, F> = unsafe {
         mem::transmute(state)
     };
+    debug_assert!(borrowed_state.returned_value.is_none());
 
     let value = (borrowed_state.try_block.take().unwrap())();
     borrowed_state.returned_value = Some(value);
@@ -104,13 +112,42 @@ pub fn try<T, F: FnOnce() -> T>(func: F) -> Result<T, Box<Exception>> {
 }
 
 fn throw_boxed_exception(boxed: Box<Exception>) -> ! {
-    let ex: FakeTraitObject = unsafe { mem::transmute(Box::into_raw(boxed)) };
-    unsafe { cpp_throw_rust(ex) }
+    let cpp_ex = boxed.cpp_exception();
+    if !cpp_ex.is_null() {
+        // The exception is really a C++ exception that we have already caught
+        // once. Rethrow it instead.
+        unsafe { cpp_rethrow(cpp_ex) }
+    }
+    else {
+        let ex: FakeTraitObject = unsafe { mem::transmute(Box::into_raw(boxed)) };
+        unsafe { cpp_throw_rust(ex) }
+    }
 }
 
 pub fn throw<T: Exception>(exception: T) -> ! {
     let boxed: Box<Exception> = Box::new(exception);
     throw_boxed_exception(boxed)
+}
+
+impl Rethrow for Box<Exception> {
+    fn rethrow(self) -> ! {
+        throw_boxed_exception(self)
+    }
+}
+
+impl<T> Rethrow for T where T: Exception {
+    fn rethrow(self) -> ! {
+        throw(self)
+    }
+}
+
+impl<T> UnwrapOrRethrow<T> for Result<T, Box<Exception>> {
+    fn unwrap_or_rethrow(self) -> T {
+        match self {
+            Ok(x) => x,
+            Err(ex) => ex.rethrow()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +206,47 @@ fn test_catch_cpp_exception() {
     });
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().what(), "Hello from C++!");
+}
+
+
+#[test]
+fn test_rethrow_rust() {
+    let r2 = try(|| {
+        let r1 = try(|| {
+            throw(TestException{message: "Rust Exception".into()});
+        });
+        assert!(r1.is_err());
+        r1.unwrap_err().rethrow();
+    });
+    assert!(r2.is_err());
+    assert_eq!(r2.unwrap_err().what(), "Rust Exception");
+}
+
+
+#[test]
+fn test_rethrow_cpp() {
+    let r2 = try(|| {
+        let r1 = try(|| {
+            let message = std::ffi::CString::new("C++ Exception").unwrap();
+            let msg_cstr: &CStr = message.borrow();
+            unsafe { cpp_throw_test_exception(msg_cstr.as_ptr()); }
+        });
+        assert!(r1.is_err());
+        r1.unwrap_err().rethrow();
+    });
+    assert!(r2.is_err());
+    assert_eq!(r2.unwrap_err().what(), "C++ Exception");
+}
+
+#[test]
+fn test_unwrap_or_rethrow() {
+    let r2 = try(|| {
+        let r1 = try(|| {
+            throw(TestException{message: "Rust Exception".into()});
+        });
+        r1.unwrap_or_rethrow()
+    });
+    assert!(r2.is_err());
+    assert_eq!(r2.unwrap_err().what(), "Rust Exception");
 }
 

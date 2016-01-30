@@ -1,5 +1,6 @@
 #include <exception>
 #include <string>
+#include <cassert>
 
 
 struct FakeTraitObject {
@@ -10,6 +11,7 @@ struct FakeTraitObject {
 struct NativeCppException {
     virtual ~NativeCppException() {}
     virtual const char* what() = 0;
+    virtual std::exception_ptr get_exception_ptr() const = 0;
 };
 
 struct RustExceptionAsCppException : NativeCppException {
@@ -19,6 +21,10 @@ struct RustExceptionAsCppException : NativeCppException {
 
     const char* what() final {
         return "<rust exception>";
+    }
+
+    std::exception_ptr get_exception_ptr() const {
+        assert(false && "Expected a C++ exception, but was a Rust exception.");
     }
 };
 
@@ -30,6 +36,10 @@ struct UnknownException : NativeCppException {
     const char* what() final {
         return "<unknown exception>";
     }
+
+    std::exception_ptr get_exception_ptr() const {
+        return exception;
+    }
 };
 
 struct StandardException : NativeCppException {
@@ -40,6 +50,10 @@ struct StandardException : NativeCppException {
 
     const char* what() final {
         return message.c_str();
+    }
+
+    std::exception_ptr get_exception_ptr() const {
+        return ptr;
     }
 };
 
@@ -79,6 +93,15 @@ extern "C"
 void
 cpp_throw_rust(FakeTraitObject fto) {
     throw fto;
+}
+
+
+extern "C"
+void
+cpp_rethrow(void* exception) {
+    auto ex = reinterpret_cast<NativeCppException*>(exception);
+    auto exptr = ex->get_exception_ptr();
+    std::rethrow_exception(exptr);
 }
 
 
