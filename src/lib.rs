@@ -105,6 +105,10 @@ pub fn try<T, F: FnOnce() -> T>(func: F) -> Result<T, Box<Exception>> {
     })
 }
 
+pub fn try_or_panic<T, F: FnOnce() -> T>(func: F) -> T {
+    try(func).unwrap_or_else(|e| panic!("uncaught exception: {}", e.what()))
+}
+
 fn throw_boxed_exception(boxed: Box<Exception>) -> ! {
     let cpp_ex = boxed.cpp_exception();
     if !cpp_ex.is_null() {
@@ -254,5 +258,19 @@ mod test {
         assert_eq!(r2.unwrap_err().what(), "Rust Exception");
     }
 
+    // This is currently not possible without changes to the Rust runtime.
+    //#[test]
+    //#[should_panic(expected = "fatal runtime error")]
+    //fn test_uncaught_exception_panics() {
+    //    throw(TestException{message: "Uncaught".into()});
+    //}
+
+    #[test]
+    #[should_panic(expected = "uncaught exception")]
+    fn test_uncaught_exception_panics() {
+        let _ = try_or_panic(|| {
+            throw(TestException{message: "Uncaught".into()});
+        });
+    }
 }
 
