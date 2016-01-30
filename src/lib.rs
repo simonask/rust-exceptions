@@ -4,9 +4,6 @@ use std::mem;
 use std::any::Any;
 use std::ffi::CStr;
 
-#[cfg(test)]
-use std::borrow::Borrow;
-
 pub trait Exception : Any {
     fn what(&self) -> &str;
 
@@ -39,9 +36,6 @@ extern {
     fn cpp_rethrow(exception: *mut libc::c_void) -> !;
     fn cpp_exception_what(exception: *mut libc::c_void) -> *const libc::c_char;
     fn cpp_exception_destroy(exception: *mut libc::c_void);
-
-    #[cfg(test)]
-    fn cpp_throw_test_exception(message: *const libc::c_char) -> !;
 }
 
 struct NativeCppExceptionWrapper {
@@ -151,102 +145,114 @@ impl<T> UnwrapOrRethrow<T> for Result<T, Box<Exception>> {
 }
 
 #[cfg(test)]
-struct TestException {
-    message: String
-}
+mod test {
+    use std::borrow::Borrow;
+    use super::*;
+    use libc;
+    use std;
+    use std::ffi::CStr;
 
-#[cfg(test)]
-impl Exception for TestException {
-    fn what(&self) -> &str {
-        self.message.as_ref()
+    #[link(name = "cpp_exceptions_wrapper")]
+    extern {
+        fn cpp_throw_test_exception(message: *const libc::c_char) -> !;
     }
-}
 
-#[test]
-fn test_cpp_unwind() {
-    let result = try(|| {
-        throw(TestException{message: "Hello, World!".into()});
-    });
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().what(), "Hello, World!");
-}
-
-#[cfg(test)]
-struct Droppable<'a> {
-    dropped: &'a mut bool
-}
-
-#[cfg(test)]
-impl<'a> Drop for Droppable<'a> {
-    fn drop(&mut self) {
-        *self.dropped = true
+    struct TestException {
+        message: String
     }
-}
 
-#[test]
-fn test_exception_unwind_calls_drop() {
-    let mut dropped = false;
-    let result = try(|| {
-        let droppable = Droppable{dropped: &mut dropped};
-        assert!(!*droppable.dropped);
-        throw(TestException{message: "Dropped!".into()});
-    });
-    assert!(result.is_err());
-    assert!(dropped);
-}
-
-#[test]
-fn test_catch_cpp_exception() {
-    let result = try(|| {
-        unsafe {
-            let message = std::ffi::CString::new("Hello from C++!").unwrap();
-            let msg_cstr: &CStr = message.borrow();
-            cpp_throw_test_exception(msg_cstr.as_ptr());
+    impl Exception for TestException {
+        fn what(&self) -> &str {
+            self.message.as_ref()
         }
-    });
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().what(), "Hello from C++!");
-}
+    }
 
+    struct Droppable<'a> {
+        dropped: &'a mut bool
+    }
 
-#[test]
-fn test_rethrow_rust() {
-    let r2 = try(|| {
-        let r1 = try(|| {
-            throw(TestException{message: "Rust Exception".into()});
+    impl<'a> Drop for Droppable<'a> {
+        fn drop(&mut self) {
+            *self.dropped = true
+        }
+    }
+
+    #[test]
+    fn test_cpp_unwind() {
+        let result = try(|| {
+            throw(TestException{message: "Hello, World!".into()});
         });
-        assert!(r1.is_err());
-        r1.unwrap_err().rethrow();
-    });
-    assert!(r2.is_err());
-    assert_eq!(r2.unwrap_err().what(), "Rust Exception");
-}
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().what(), "Hello, World!");
+    }
 
 
-#[test]
-fn test_rethrow_cpp() {
-    let r2 = try(|| {
-        let r1 = try(|| {
-            let message = std::ffi::CString::new("C++ Exception").unwrap();
-            let msg_cstr: &CStr = message.borrow();
-            unsafe { cpp_throw_test_exception(msg_cstr.as_ptr()); }
+    #[test]
+    fn test_exception_unwind_calls_drop() {
+        let mut dropped = false;
+        let result = try(|| {
+            let droppable = Droppable{dropped: &mut dropped};
+            assert!(!*droppable.dropped);
+            throw(TestException{message: "Dropped!".into()});
         });
-        assert!(r1.is_err());
-        r1.unwrap_err().rethrow();
-    });
-    assert!(r2.is_err());
-    assert_eq!(r2.unwrap_err().what(), "C++ Exception");
-}
+        assert!(result.is_err());
+        assert!(dropped);
+    }
 
-#[test]
-fn test_unwrap_or_rethrow() {
-    let r2 = try(|| {
-        let r1 = try(|| {
-            throw(TestException{message: "Rust Exception".into()});
+    #[test]
+    fn test_catch_cpp_exception() {
+        let result = try(|| {
+            unsafe {
+                let message = std::ffi::CString::new("Hello from C++!").unwrap();
+                let msg_cstr: &CStr = message.borrow();
+                cpp_throw_test_exception(msg_cstr.as_ptr());
+            }
         });
-        r1.unwrap_or_rethrow()
-    });
-    assert!(r2.is_err());
-    assert_eq!(r2.unwrap_err().what(), "Rust Exception");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().what(), "Hello from C++!");
+    }
+
+
+    #[test]
+    fn test_rethrow_rust() {
+        let r2 = try(|| {
+            let r1 = try(|| {
+                throw(TestException{message: "Rust Exception".into()});
+            });
+            assert!(r1.is_err());
+            r1.unwrap_err().rethrow();
+        });
+        assert!(r2.is_err());
+        assert_eq!(r2.unwrap_err().what(), "Rust Exception");
+    }
+
+
+    #[test]
+    fn test_rethrow_cpp() {
+        let r2 = try(|| {
+            let r1 = try(|| {
+                let message = std::ffi::CString::new("C++ Exception").unwrap();
+                let msg_cstr: &CStr = message.borrow();
+                unsafe { cpp_throw_test_exception(msg_cstr.as_ptr()); }
+            });
+            assert!(r1.is_err());
+            r1.unwrap_err().rethrow();
+        });
+        assert!(r2.is_err());
+        assert_eq!(r2.unwrap_err().what(), "C++ Exception");
+    }
+
+    #[test]
+    fn test_unwrap_or_rethrow() {
+        let r2 = try(|| {
+            let r1 = try(|| {
+                throw(TestException{message: "Rust Exception".into()});
+            });
+            r1.unwrap_or_rethrow()
+        });
+        assert!(r2.is_err());
+        assert_eq!(r2.unwrap_err().what(), "Rust Exception");
+    }
+
 }
 
